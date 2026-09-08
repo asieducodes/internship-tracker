@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Clock3,
   AlertTriangle,
   Send,
   Users,
@@ -19,6 +20,7 @@ import {
   FileText,
   Sun,
   Moon,
+  CalendarCheck,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -40,6 +42,14 @@ const PRIORITY_META = {
   Low: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30',
 };
 
+const ATTENDANCE_STATUS_META = {
+  Present: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30',
+  Late: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30',
+  Absent: 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/30',
+};
+
+const ATTENDANCE_STATUSES = ['Present', 'Late', 'Absent'];
+
 const PRIORITY_OPTIONS = ['All', 'High', 'Medium', 'Low'];
 
 const EMPTY_TASK_FORM = {
@@ -47,6 +57,7 @@ const EMPTY_TASK_FORM = {
   assignee: '',
   priority: 'Medium',
   due_date: '',
+  hours_logged: '',
 };
 
 const EMPTY_REPORT_FORM = {
@@ -54,6 +65,11 @@ const EMPTY_REPORT_FORM = {
   accomplishments: '',
   blockers: '',
   next_steps: '',
+};
+
+const EMPTY_CHECKIN_FORM = {
+  intern_name: '',
+  status: 'Present',
 };
 
 const THEME_KEY = 'sarbahtek-tracker-theme';
@@ -66,6 +82,13 @@ function formatDate(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function todayIso() {
+  const d = new Date();
+  const offset = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - offset * 60 * 1000);
+  return local.toISOString().slice(0, 10);
 }
 
 function initials(name) {
@@ -134,10 +157,11 @@ function useTheme() {
 
 export default function App() {
   const { theme, toggleTheme } = useTheme();
-  const [view, setView] = useState('board'); // 'board' | 'reports'
+  const [view, setView] = useState('board'); // 'board' | 'reports' | 'attendance'
 
   const [tasks, setTasks] = useState([]);
   const [reports, setReports] = useState([]);
+  const [attendance, setAttendance] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -147,8 +171,10 @@ export default function App() {
 
   const [taskForm, setTaskForm] = useState(EMPTY_TASK_FORM);
   const [reportForm, setReportForm] = useState(EMPTY_REPORT_FORM);
+  const [checkinForm, setCheckinForm] = useState(EMPTY_CHECKIN_FORM);
   const [savingTask, setSavingTask] = useState(false);
   const [savingReport, setSavingReport] = useState(false);
+  const [savingCheckin, setSavingCheckin] = useState(false);
 
   const [searchText, setSearchText] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('All');
@@ -172,18 +198,32 @@ export default function App() {
     return data ?? [];
   }, []);
 
+  const fetchAttendance = useCallback(async () => {
+    const { data, error: fetchError } = await supabase
+      .from('attendance')
+      .select('*')
+      .order('date', { ascending: false });
+    if (fetchError) throw fetchError;
+    return data ?? [];
+  }, []);
+
   const loadAll = useCallback(async () => {
     try {
       setError(null);
-      const [taskRows, reportRows] = await Promise.all([fetchTasks(), fetchReports()]);
+      const [taskRows, reportRows, attendanceRows] = await Promise.all([
+        fetchTasks(),
+        fetchReports(),
+        fetchAttendance(),
+      ]);
       setTasks(taskRows);
       setReports(reportRows);
+      setAttendance(attendanceRows);
     } catch (err) {
       setError(err.message || 'Something went wrong while loading data.');
     } finally {
       setLoading(false);
     }
-  }, [fetchTasks, fetchReports]);
+  }, [fetchTasks, fetchReports, fetchAttendance]);
 
   useEffect(() => {
     loadAll();
@@ -196,7 +236,8 @@ export default function App() {
     const done = tasks.filter((t) => t.status === 'Done').length;
     const completion = total === 0 ? 0 : Math.round((done / total) * 100);
     const activeBlockers = reports.filter((r) => r.blockers && r.blockers.trim().length > 0).length;
-    return { total, completion, activeBlockers };
+    const totalHours = tasks.reduce((sum, t) => sum + (Number(t.hours_logged) || 0), 0);
+    return { total, completion, activeBlockers, totalHours };
   }, [tasks, reports]);
 
   const filteredTasks = useMemo(() => {
@@ -230,6 +271,19 @@ export default function App() {
         r.blockers?.toLowerCase().includes(query)
     );
   }, [reports, reportSearch]);
+
+  const attendanceSummary = useMemo(() => {
+    const byIntern = new Map();
+    for (const record of attendance) {
+      const entry = byIntern.get(record.intern_name) || { name: record.intern_name, present: 0, late: 0, absent: 0, total: 0 };
+      entry.total += 1;
+      if (record.status === 'Present') entry.present += 1;
+      else if (record.status === 'Late') entry.late += 1;
+      else entry.absent += 1;
+      byIntern.set(record.intern_name, entry);
+    }
+    return Array.from(byIntern.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [attendance]);
 
   // -- Task mutations -----------------------------------------------------------
 
@@ -265,6 +319,7 @@ export default function App() {
       assignee: task.assignee,
       priority: task.priority,
       due_date: task.due_date || '',
+      hours_logged: task.hours_logged ? String(task.hours_logged) : '',
     });
     setDrawerOpen(true);
   };
@@ -296,6 +351,7 @@ export default function App() {
       assignee: taskForm.assignee.trim(),
       priority: taskForm.priority,
       due_date: taskForm.due_date || null,
+      hours_logged: taskForm.hours_logged === '' ? 0 : Number(taskForm.hours_logged),
     };
 
     const { error: mutationError } = editingTask
@@ -354,6 +410,38 @@ export default function App() {
     ]);
   };
 
+  // -- Attendance mutations -------------------------------------------------------
+
+  const handleCheckinFormChange = (field) => (event) => {
+    setCheckinForm((prev) => ({ ...prev, [field]: event.target.value }));
+  };
+
+  const submitCheckin = async (event) => {
+    event.preventDefault();
+    if (!checkinForm.intern_name.trim()) return;
+
+    setSavingCheckin(true);
+    const { error: upsertError } = await supabase
+      .from('attendance')
+      .upsert(
+        {
+          intern_name: checkinForm.intern_name.trim(),
+          date: todayIso(),
+          status: checkinForm.status,
+        },
+        { onConflict: 'intern_name,date' }
+      );
+    setSavingCheckin(false);
+
+    if (upsertError) {
+      setError(upsertError.message);
+      return;
+    }
+
+    setCheckinForm((prev) => ({ ...prev, status: 'Present' }));
+    loadAll();
+  };
+
   // -- Render -----------------------------------------------------------------
 
   return (
@@ -397,12 +485,21 @@ export default function App() {
               <RecentReports reports={reports.slice(0, 6)} onSeeAll={() => setView('reports')} />
             </div>
           </>
-        ) : (
+        ) : view === 'reports' ? (
           <ReportsPage
             reports={filteredReports}
             search={reportSearch}
             onSearchChange={setReportSearch}
             onExport={exportReportsCsv}
+          />
+        ) : (
+          <AttendancePage
+            attendance={attendance}
+            summary={attendanceSummary}
+            form={checkinForm}
+            saving={savingCheckin}
+            onChange={handleCheckinFormChange}
+            onSubmit={submitCheckin}
           />
         )}
       </div>
@@ -473,6 +570,12 @@ function TopBar({ view, onChangeView, onNewTask, onSubmitReport, theme, onToggle
               icon={<FileText size={14} />}
               label="Reports"
             />
+            <TabButton
+              active={view === 'attendance'}
+              onClick={() => onChangeView('attendance')}
+              icon={<CalendarCheck size={14} />}
+              label="Attendance"
+            />
           </nav>
 
           <button
@@ -521,7 +624,7 @@ function TabButton({ active, onClick, icon, label }) {
 
 function MetricsRow({ metrics }) {
   return (
-    <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+    <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard
         icon={<ListChecks size={18} className="text-indigo-500 dark:text-indigo-400" />}
         label="Total tasks"
@@ -531,6 +634,11 @@ function MetricsRow({ metrics }) {
         icon={<Gauge size={18} className="text-emerald-500 dark:text-emerald-400" />}
         label="Completion rate"
         value={`${metrics.completion}%`}
+      />
+      <MetricCard
+        icon={<Clock3 size={18} className="text-sky-500 dark:text-sky-400" />}
+        label="Hours logged"
+        value={metrics.totalHours}
       />
       <MetricCard
         icon={<AlertTriangle size={18} className="text-amber-500 dark:text-amber-400" />}
@@ -646,6 +754,7 @@ function TaskCard({ task, status, onMove, onEdit, onDelete }) {
   const isFirst = STATUS_ORDER.indexOf(status) === 0;
   const isLast = STATUS_ORDER.indexOf(status) === STATUS_ORDER.length - 1;
   const overdue = isOverdue(task);
+  const hours = Number(task.hours_logged) || 0;
 
   return (
     <div
@@ -681,6 +790,13 @@ function TaskCard({ task, status, onMove, onEdit, onDelete }) {
           {overdue && <span className="font-medium">· overdue</span>}
         </div>
       </div>
+
+      {hours > 0 && (
+        <div className="mt-1.5 flex items-center gap-1 text-xs text-slate-400 dark:text-slate-500">
+          <Clock3 size={12} />
+          {hours}h logged
+        </div>
+      )}
 
       <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-2 dark:border-slate-800">
         <div className="flex items-center gap-1">
@@ -844,6 +960,118 @@ function ReportField({ label, value, tone = 'default' }) {
 }
 
 // ---------------------------------------------------------------------------
+// Attendance page
+// ---------------------------------------------------------------------------
+
+function AttendancePage({ attendance, summary, form, saving, onChange, onSubmit }) {
+  return (
+    <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
+      <div className="flex flex-col gap-6">
+        <form
+          onSubmit={onSubmit}
+          className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/60"
+        >
+          <h2 className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
+            <CalendarCheck size={16} className="text-indigo-500 dark:text-indigo-400" />
+            Check in for today
+          </h2>
+          <div className="mt-4 flex flex-col gap-3">
+            <input
+              type="text"
+              required
+              value={form.intern_name}
+              onChange={onChange('intern_name')}
+              placeholder="Your name"
+              className={INPUT_CLASS}
+            />
+            <div className="flex gap-2">
+              {ATTENDANCE_STATUSES.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => onChange('status')({ target: { value: s } })}
+                  className={`flex-1 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                    form.status === s
+                      ? ATTENDANCE_STATUS_META[s]
+                      : 'border-slate-300 text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+            <button
+              type="submit"
+              disabled={saving}
+              className="rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {saving ? 'Checking in…' : 'Check in'}
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-slate-400 dark:text-slate-600">
+            Checking in again today updates your existing entry instead of creating a duplicate.
+          </p>
+        </form>
+
+        <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/60">
+          <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <h2 className="text-sm font-medium text-slate-700 dark:text-slate-200">Per-intern summary</h2>
+          </div>
+          <div className="flex flex-col divide-y divide-slate-200 dark:divide-slate-800">
+            {summary.length === 0 ? (
+              <p className="px-4 py-6 text-center text-xs text-slate-400 dark:text-slate-600">No check-ins yet.</p>
+            ) : (
+              summary.map((s) => (
+                <div key={s.name} className="flex items-center justify-between px-4 py-3">
+                  <span className="text-sm font-medium text-slate-900 dark:text-slate-100">{s.name}</span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    {s.present} present · {s.late} late · {s.absent} absent
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/60">
+        <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+          <h2 className="text-sm font-medium text-slate-700 dark:text-slate-200">Attendance log</h2>
+        </div>
+        <div className="flex flex-col divide-y divide-slate-200 dark:divide-slate-800">
+          {attendance.length === 0 ? (
+            <p className="px-4 py-10 text-center text-sm text-slate-400 dark:text-slate-600">
+              No check-ins recorded yet.
+            </p>
+          ) : (
+            attendance.map((record) => (
+              <div key={record.id} className="flex items-center justify-between px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                    {initials(record.intern_name)}
+                  </span>
+                  <span className="text-sm text-slate-900 dark:text-slate-100">{record.intern_name}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-400 dark:text-slate-500">{formatDate(record.date)}</span>
+                  <span
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                      ATTENDANCE_STATUS_META[record.status] || ATTENDANCE_STATUS_META.Present
+                    }`}
+                  >
+                    {record.status}
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Task creation / edit drawer
 // ---------------------------------------------------------------------------
 
@@ -883,6 +1111,18 @@ function TaskDrawer({ open, editing, form, saving, onChange, onClose, onSubmit }
 
         <Field label="Due date">
           <input type="date" value={form.due_date} onChange={onChange('due_date')} className={INPUT_CLASS} />
+        </Field>
+
+        <Field label="Hours logged">
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            value={form.hours_logged}
+            onChange={onChange('hours_logged')}
+            placeholder="e.g. 2.5"
+            className={INPUT_CLASS}
+          />
         </Field>
 
         <div className="mt-auto flex gap-3 pt-4">
@@ -1030,10 +1270,7 @@ function Footer() {
   return (
     <footer className="border-t border-slate-200 bg-slate-50 px-6 py-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-500">
       © {year} SarbahTek Solutions. <br/>
-      Developed by Seth Smart & Margaret. All rights reserved. <br/>
-      <a href="https://sarbahteksolutions.com" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-600">
-        https://sarbahteksolutions.com
-      </a>
+      Developed by Seth Smart & Margaret. All rights reserved
     </footer>
   );
 }
